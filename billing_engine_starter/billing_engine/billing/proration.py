@@ -1,106 +1,59 @@
 """
-DunningProcess — finite state machine for failed-payment retries.
+Proration helper used by BillingCycle upgrades.
 
-States:
-    PENDING       (initial)  →  RETRYING  on first failure
-    RETRYING      ──→ SUCCEEDED    when a retry succeeds
-                  ──→ FAILED_FINAL after 3 total failures
-    SUCCEEDED     (terminal)
-    FAILED_FINAL  (terminal — also flips subscription to PAST_DUE)
-
-Retry schedule:
-    attempt 2 scheduled at  now + 1 day
-    attempt 3 scheduled at  now + 3 days
-    (no attempt 4 — after the 3rd failure we mark FAILED_FINAL)
-
-After the subscription has been PAST_DUE for 7 days with no recovery,
-the BillingCycle.run (Day 2 work) may flip it to CANCELLED — that
-transition does NOT live in this file.
+Computes the credit and charge for leaving one plan mid-period and
+switching to another plan for the remaining days in the current billing
+cycle. Taxes are calculated separately for the credit and charge legs.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import date, datetime, timedelta
-from enum import Enum
-from typing import Optional
+from datetime import date
+from decimal import Decimal
 
-from billing_engine.db import (
-    InvoiceRepository, LedgerRepository, SubscriptionRepository,
-    PaymentAttemptRepository,
-)
-from billing_engine.models import Invoice, LedgerEntry, LedgerDirection, SubscriptionStatus
-from billing_engine.payments.gateway import PaymentGateway, PaymentResult
-
-
-class DunningState(str, Enum):
-    PENDING = "PENDING"
-    RETRYING = "RETRYING"
-    SUCCEEDED = "SUCCEEDED"
-    FAILED_FINAL = "FAILED_FINAL"
+from billing_engine.money import Money
+from billing_engine.taxes.base import TaxCalculator, TaxContext
 
 
 @dataclass(frozen=True)
-class DunningOutcome:
-    state: DunningState
-    attempt_no: int
-    next_retry_at: Optional[datetime]
+class ProrationResult:
+    credit_amount: Money
+    charge_amount: Money
+    credit_tax: Money
+    charge_tax: Money
 
 
-# Retry intervals (in days) after each failure, indexed by attempt_no JUST COMPLETED.
-# After failure of attempt 1, schedule attempt 2 at +1 day.
-# After failure of attempt 2, schedule attempt 3 at +3 days.
-# After failure of attempt 3, no more retries → FAILED_FINAL.
-RETRY_DELAYS_DAYS = {1: 1, 2: 3}
-MAX_ATTEMPTS = 3
+def compute_proration(
+    old_plan_price: Money,
+    new_plan_price: Money,
+    period_start: date,
+    period_end: date,
+    switch_date: date,
+    tax_calc: TaxCalculator,
+    tax_context: TaxContext,
+) -> ProrationResult:
+    if switch_date < period_start or switch_date > period_end:
+        raise ValueError("switch_date must be within the billing period")
+    if old_plan_price.currency != new_plan_price.currency:
+        raise ValueError("Currency mismatch between old and new plan prices")
 
+    total_days = (period_end - period_start).days
+    if total_days <= 0:
+        raise ValueError("Invalid billing period")
 
-class DunningProcess:
-    def __init__(
-        self,
-        gateway: PaymentGateway,
-        invoice_repo: InvoiceRepository,
-        ledger_repo: LedgerRepository,
-        subscription_repo: SubscriptionRepository,
-        attempt_repo: PaymentAttemptRepository,
-    ) -> None:
-        self.gateway = gateway
-        self.invoice_repo = invoice_repo
-        self.ledger_repo = ledger_repo
-        self.subscription_repo = subscription_repo
-        self.attempt_repo = attempt_repo
+    remaining_days = (period_end - switch_date).days
+    ratio = Decimal(remaining_days) / Decimal(total_days)
 
-    def attempt(self, invoice: Invoice, customer_id: int, now: datetime) -> DunningOutcome:
-        """Try once. Record the attempt. Return the resulting outcome."""
-        attempt_no = self.attempt_repo.count_for_invoice(invoice.id) + 1
-        result = self.gateway.charge(invoice)
+    credit_amount = Money(old_plan_price.amount * ratio, old_plan_price.currency).rounded()
+    charge_amount = Money(new_plan_price.amount * ratio, new_plan_price.currency).rounded()
 
-        if result.success:
-            self.invoice_repo.mark_paid(invoice.id)
-            self.ledger_repo.add(LedgerEntry(
-                id=None, invoice_id=invoice.id, customer_id=customer_id,
-                amount=invoice.total, direction=LedgerDirection.CREDIT,
-                reason=f"Payment for invoice {invoice.id}",
-            ))
-            self.attempt_repo.add(invoice.id, attempt_no, "SUCCESS", None, None)
-            return DunningOutcome(DunningState.SUCCEEDED, attempt_no, None)
+    credit_tax = tax_calc.apply(credit_amount, tax_context).total
+    charge_tax = tax_calc.apply(charge_amount, tax_context).total
 
-        if attempt_no >= MAX_ATTEMPTS:
-            self.invoice_repo.mark_failed(invoice.id)
-            self.subscription_repo.update_status(
-                invoice.subscription_id, SubscriptionStatus.PAST_DUE,
-                past_due_since=now.date(),
-            )
-            self.attempt_repo.add(invoice.id, attempt_no, "FAILED", result.failure_reason, None)
-            return DunningOutcome(DunningState.FAILED_FINAL, attempt_no, None)
-
-        delay = RETRY_DELAYS_DAYS[attempt_no]
-        next_retry = now + timedelta(days=delay)
-        self.attempt_repo.add(invoice.id, attempt_no, "FAILED", result.failure_reason, next_retry)
-        return DunningOutcome(DunningState.RETRYING, attempt_no, next_retry)
-
-    # --------------------------------------------------------
-    @staticmethod
-    def should_cancel(past_due_since: date, today: date, grace_days: int = 7) -> bool:
-        """Helper used by BillingCycle to decide PAST_DUE → CANCELLED."""
-        return (today - past_due_since).days >= grace_days
+    return ProrationResult(
+        credit_amount=credit_amount,
+        charge_amount=charge_amount,
+        credit_tax=credit_tax,
+        charge_tax=charge_tax,
+    )
