@@ -14,7 +14,7 @@ Usage:
 from __future__ import annotations
 
 import sqlite3
-from contextlib import contextmanager
+from contextlib import contextmanager, closing
 from pathlib import Path
 from typing import Iterator
 
@@ -25,11 +25,15 @@ class Database:
     def __init__(self, path: str | Path) -> None:
         self.path = str(path)
 
-    def connect(self) -> sqlite3.Connection:
+    @contextmanager
+    def connect(self) -> Iterator[sqlite3.Connection]:
         conn = sqlite3.connect(self.path)
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA foreign_keys = ON;")
-        return conn
+        try:
+            yield conn
+        finally:
+            conn.close()
 
     def init_schema(self) -> None:
         """Create all tables (idempotent — uses CREATE TABLE IF NOT EXISTS)."""
@@ -44,13 +48,11 @@ class Database:
         Uses BEGIN IMMEDIATE so we acquire a write lock up front and avoid
         the silent-rollback foot-gun where two writers see overlapping reads.
         """
-        conn = self.connect()
-        try:
-            conn.execute("BEGIN IMMEDIATE;")
-            yield conn
-            conn.commit()
-        except Exception:
-            conn.rollback()
-            raise
-        finally:
-            conn.close()
+        with self.connect() as conn:
+            try:
+                conn.execute("BEGIN IMMEDIATE;")
+                yield conn
+                conn.commit()
+            except Exception:
+                conn.rollback()
+                raise
