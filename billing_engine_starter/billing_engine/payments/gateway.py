@@ -41,12 +41,12 @@ class ScriptedGateway(PaymentGateway):
     """
 
     def __init__(self, results: list[PaymentResult]) -> None:
-        # TODO Day 3
-        raise NotImplementedError("Day 3: implement ScriptedGateway.__init__")
+        self._results = list(results)
 
     def charge(self, invoice: Invoice) -> PaymentResult:
-        # TODO Day 3
-        raise NotImplementedError("Day 3: implement ScriptedGateway.charge")
+        if not self._results:
+            raise RuntimeError("ScriptedGateway has no more results")
+        return self._results.pop(0)
 
 
 # ----------------------------------------------------------------
@@ -56,9 +56,13 @@ class FakeRandomGateway(PaymentGateway):
     """Succeeds at a configurable rate; seeded for reproducibility."""
 
     def __init__(self, success_rate: float = 0.7, seed: Optional[int] = None) -> None:
-        # TODO Day 3
-        raise NotImplementedError("Day 3: implement FakeRandomGateway.__init__")
+        import random
+
+        self.success_rate = success_rate
+        self.random = random.Random(seed)
 
     def charge(self, invoice: Invoice) -> PaymentResult:
-        # TODO Day 3
-        raise NotImplementedError("Day 3: implement FakeRandomGateway.charge")
+        success = self.random.random() < self.success_rate
+        if success:
+            return PaymentResult(True)
+        return PaymentResult(False, "DECLINED")
