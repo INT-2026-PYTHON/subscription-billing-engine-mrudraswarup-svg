@@ -38,5 +38,64 @@ def build_invoice(
     invoice_count_so_far: int,
 ) -> Invoice:
     """Pure function. Returns an Invoice (id=None, status=DRAFT) ready to be persisted."""
-    # TODO Day 2
-    raise NotImplementedError("Day 2: implement build_invoice")
+    # Calculate base charge from strategy
+    base = strategy.calculate(usage_quantity)
+    
+    # Calculate discount
+    discount_context = DiscountContext(invoice_count_so_far=invoice_count_so_far)
+    discount_amount = discount.apply(base, discount_context) if discount else Money.zero(base.currency)
+    
+    # Calculate taxable amount (base - discount)
+    taxable = base - discount_amount
+    
+    # Calculate tax
+    tax_breakdown = tax_calc.apply(taxable, tax_context)
+    
+    # Calculate total
+    total = taxable + tax_breakdown.total
+    
+    # Create line items
+    line_items: list[InvoiceLineItem] = []
+    
+    # Base line item
+    line_items.append(InvoiceLineItem(
+        id=None,
+        invoice_id=None,
+        description="Subscription charge",
+        amount=base,
+        kind=LineItemKind.BASE,
+    ))
+    
+    # Discount line item (if any)
+    if discount_amount.is_positive():
+        line_items.append(InvoiceLineItem(
+            id=None,
+            invoice_id=None,
+            description="Discount",
+            amount=-discount_amount,
+            kind=LineItemKind.DISCOUNT,
+        ))
+    
+    # Tax line items (one per tax component)
+    for tax_component_label, tax_component_amount in tax_breakdown.components:
+        line_items.append(InvoiceLineItem(
+            id=None,
+            invoice_id=None,
+            description=tax_component_label,
+            amount=tax_component_amount,
+            kind=LineItemKind.TAX,
+        ))
+    
+    # Create invoice
+    return Invoice(
+        id=None,
+        subscription_id=subscription.id,
+        period_start=period_start,
+        period_end=period_end,
+        subtotal=base,
+        discount_total=discount_amount,
+        tax_total=tax_breakdown.total,
+        total=total,
+        status=InvoiceStatus.DRAFT,
+        line_items=line_items,
+    )
