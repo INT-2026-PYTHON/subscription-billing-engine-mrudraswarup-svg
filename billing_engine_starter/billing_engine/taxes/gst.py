@@ -31,12 +31,13 @@ class GSTCalculator(TaxCalculator):
     def apply(self, taxable: Money, context: TaxContext) -> TaxBreakdown:
         intra_state = bool(context.customer_state) and context.customer_state == context.seller_state
         if intra_state:
-            cgst_amount = (taxable * self.cgst).rounded()
-            sgst_amount = (taxable * self.sgst).rounded()
-            total = cgst_amount + sgst_amount
+            cgst_amount_unrounded = taxable * self.cgst
+            sgst_amount_unrounded = taxable * self.sgst
+            # Round total AFTER adding to preserve precision
+            total = (cgst_amount_unrounded + sgst_amount_unrounded).rounded()
             components = [
-                (f"CGST {int(self.cgst * 100)}%", cgst_amount),
-                (f"SGST {int(self.sgst * 100)}%", sgst_amount),
+                (f"CGST {int(self.cgst * 100)}%", cgst_amount_unrounded.rounded()),
+                (f"SGST {int(self.sgst * 100)}%", sgst_amount_unrounded.rounded()),
             ]
             return TaxBreakdown(components=components, total=total)
 
